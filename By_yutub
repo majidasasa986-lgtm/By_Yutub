@@ -1,0 +1,80 @@
+import sqlite3
+import datetime
+from flask import Flask
+from telebot import TeleBot
+
+# تنظیمات اولیه
+TOKEN = "YOUR_BOT_TOKEN"
+bot = TeleBot(TOKEN)
+app = Flask(__name__)
+
+# دیتابیس ساده
+def get_user_status(user_id):
+    conn = sqlite3.connect('users.db')
+    cursor = conn.cursor()
+    cursor.execute("SELECT is_premium, expiry_date FROM users WHERE user_id = ?", (user_id,))
+    data = cursor.fetchone()
+    conn.close()
+    
+    if not data: return False, None
+    
+    is_premium, expiry_str = data
+    if is_premium and expiry_str:
+        expiry_date = datetime.datetime.strptime(expiry_str, '%Y-%m-%d')
+        # بررسی انقضا
+        if datetime.datetime.now() > expiry_date:
+            # غیرفعال کردن خودکار
+            disable_premium(user_id)
+            return False, None
+        return True, expiry_date
+    return False, None
+
+def disable_premium(user_id):
+    conn = sqlite3.connect('users.db')
+    cursor = conn.cursor()
+    cursor.execute("UPDATE users SET is_premium = 0 WHERE user_id = ?", (user_id,))
+    conn.commit()
+    conn.close()
+    try:
+        bot.send_message(user_id, "⏳ Your Premium subscription has expired.\nPlease renew to continue unlimited downloads.")
+    except: pass
+
+# --- بخش Flask برای UptimeRobot ---
+@app.route('/')
+def ping():
+    return "Bot is alive", 200
+
+# --- لاجیک فعال‌سازی توسط ادمین (توسط ادمین فراخوانی می‌شود) ---
+def activate_premium(user_id):
+    start_date = datetime.datetime.now()
+    expiry_date = start_date + datetime.timedelta(days=30)
+    
+    conn = sqlite3.connect('users.db')
+    cursor = conn.cursor()
+    cursor.execute("""
+        UPDATE users 
+        SET is_premium = 1, subscription_start_date = ?, subscription_expiry_date = ? 
+        WHERE user_id = ?
+    """, (start_date.strftime('%Y-%m-%d'), expiry_date.strftime('%Y-%m-%d'), user_id))
+    conn.commit()
+    conn.close()
+    
+    bot.send_message(user_id, "✅ Payment approved!\n🔥 Your Premium subscription is now active for 30 days.\nEnjoy unlimited downloads!")
+
+# --- بررسی دسترسی برای دانلود ---
+@bot.message_handler(commands=['download'])
+def handle_download(message):
+    user_id = message.from_user.id
+    is_premium, _ = get_user_status(user_id)
+    
+    if is_premium:
+        bot.reply_to(message, "Downloading your file...")
+    else:
+        # اینجا لاجیک محدودیت ۵ دانلود برای کاربران عادی را اضافه کن
+        bot.reply_to(message, "You are a free user. Limit: 5 downloads. Upgrade to premium for unlimited access.")
+
+if __name__ == "__main__":
+    # در محیط واقعی، ربات و Flask باید همزمان اجرا شوند (استفاده از Threading)
+    from threading import Thread
+    Thread(target=lambda: app.run(host="0.0.0.0", port=8080)).start()
+    bot.polling()
